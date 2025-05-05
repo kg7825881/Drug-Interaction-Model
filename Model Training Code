@@ -1,0 +1,135 @@
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import TensorDataset, DataLoader
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report
+from difflib import get_close_matches
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+
+
+df = pd.read_csv('drug_dataset.csv')
+
+target_labels = ['overdose_risk', 'interaction_risk', 'safe']
+component_cols = [col for col in df.columns if col not in target_labels]
+
+X = df[component_cols].values
+y = df[target_labels].values
+
+
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
+y_train = torch.tensor(y_train, dtype=torch.float32).to(device)
+X_test = torch.tensor(X_test, dtype=torch.float32).to(device)
+y_test = torch.tensor(y_test, dtype=torch.float32).to(device)
+train_dataset = TensorDataset(X_train, y_train)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+class DrugInteractionNet(nn.Module):
+    def __init__(self, input_size=100):  # Fixed input size
+        super(DrugInteractionNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 3)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = DrugInteractionNet(input_size=101).to(device)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+
+epochs = 30
+losses, accuracies = [], []
+label_names = ['overdose_risk', 'interaction_risk', 'safe']
+label_accuracies = {name: [] for name in label_names}
+
+for epoch in range(epochs):
+    model.train()
+    epoch_loss = 0
+    correct = torch.zeros(3).to(device)
+    total = torch.zeros(3).to(device)
+
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+
+        preds = (torch.sigmoid(outputs) > 0.5).float()
+        correct += (preds == labels).sum(dim=0)
+        total += labels.size(0)
+
+    losses.append(epoch_loss)
+    epoch_accuracy = (correct / total).cpu().numpy()
+    for i, name in enumerate(label_names):
+        label_accuracies[name].append(epoch_accuracy[i] * 100)
+    avg_acc = epoch_accuracy.mean() * 100
+    accuracies.append(avg_acc)
+
+    print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.4f}, "
+          f"Avg Accuracy: {avg_acc:.2f}%, "
+          f"Label-wise: {[f'{name}: {acc:.2f}%' for name, acc in zip(label_names, epoch_accuracy * 100)]}")
+
+torch.save(model.state_dict(), "drug_model.pt")
+print("Model saved as 'drug_model.pt'")
+
+model.eval()
+with torch.no_grad():
+    outputs = model(X_test.to(device))
+    predictions = (torch.sigmoid(outputs) > 0.5).float()
+
+print("\nClassification Report:\n")
+print(classification_report(y_test.cpu().numpy(), predictions.cpu().numpy(), target_names=label_names))
+
+
+correct_eval = (predictions == y_test).sum(dim=0)
+total_eval = y_test.sum(dim=0)
+per_label_accuracy = torch.where(total_eval > 0, correct_eval / total_eval, torch.zeros_like(total_eval))
+avg_accuracy_eval = per_label_accuracy.mean().item() * 100
+
+
+for i, name in enumerate(label_names):
+    print(f"{name} Accuracy: {per_label_accuracy[i].item() * 100:.2f}%")
+
+print(f"\nAverage Accuracy on Test Set: {avg_accuracy_eval:.2f}%")
+
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(range(1, epochs + 1), losses, marker='o')
+plt.title('Training Loss over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+
+plt.subplot(1, 2, 2)
+for name in label_names:
+    plt.plot(range(1, epochs + 1), label_accuracies[name], marker='o', label=name)
+plt.title('Label-wise Accuracy over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy (%)')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
