@@ -1,0 +1,74 @@
+import torch
+import torch.nn as nn
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from difflib import get_close_matches
+import numpy as np
+
+
+df = pd.read_csv("drug_dataset.csv")
+target_labels = ['overdose_risk', 'interaction_risk', 'safe']
+component_cols = [col for col in df.columns if col not in target_labels]
+
+
+scaler = StandardScaler()
+scaler.fit(df[component_cols])
+
+
+class DrugInteractionNet(nn.Module):
+    def __init__(self, input_size=101):
+        super(DrugInteractionNet, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 3)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = DrugInteractionNet(input_size=101).to(device)
+model.load_state_dict(torch.load("drug_model.pt", map_location=device))
+model.eval()
+
+
+user_input = np.zeros(len(component_cols))
+
+n = int(input("Enter number of medicines you're taking: "))
+
+print("Available drug components:")
+print(", ".join(component_cols[:10]) + ", ...")  
+
+for i in range(n):
+    name = input(f"\nEnter name of medicine #{i+1}: ").lower()
+    dosage = float(input(f"Enter dosage (mg) for {name}: "))
+
+    
+    match = get_close_matches(name, component_cols, n=1, cutoff=0.6)
+    if match:
+        matched_col = match[0]
+        idx = component_cols.index(matched_col)
+        user_input[idx] += dosage
+        print(f"✅ Matched to: {matched_col}")
+    else:
+        print(" Drug not recognized. Skipping.")
+
+
+user_input_scaled = scaler.transform([user_input])
+user_tensor = torch.tensor(user_input_scaled, dtype=torch.float32).to(device)
+
+
+with torch.no_grad():
+    output = model(user_tensor)
+    probs = torch.sigmoid(output).squeeze().cpu().numpy()
+
+labels = ['Overdose Risk', 'Interaction Risk', 'Safe']
+print("\n🧾 Prediction Result:")
+for i, label in enumerate(labels):
+    status = "⚠️ Yes" if probs[i] > 0.5 else "✅ No"
+    print(f"{label}: {status} ({probs[i]*100:.2f}%)")
